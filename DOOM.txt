@@ -1,0 +1,303 @@
+--@name DOOM
+--@author MIHALICH
+--@client
+
+local scrSize = 1000
+local FPS = 25 
+local next_frame = 0
+local fps_delta = 1 / FPS
+local scrW, scrH = 1024, 1024
+
+render.createRenderTarget("screenRT")
+local screenMat = material.create("UnlitGeneric") 
+screenMat:setTextureRenderTarget("$basetexture", "screenRT") 
+screenMat:setInt("$flags", 0)
+
+local screen = holograms.create(chip():localToWorld(Vector(0, 0, scrSize/2)), Angle(90, -90, 0), "models/holograms/plane.mdl")
+screen:setSize(Vector(scrSize, scrSize, scrSize))
+screen:setParent(chip())
+screen:setMaterial("!" .. screenMat:getName())
+
+local baseMap = {
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,0,0,0,1,0,0,0,1,2,2,2,0,0,0,1},
+    {1,0,0,0,3,0,0,0,1,9,2,2,0,0,0,1},
+    {1,0,0,0,1,0,0,0,1,1,1,1,1,4,1,1},
+    {1,1,3,1,1,1,1,0,1,0,0,0,1,0,0,1},
+    {1,0,0,0,2,2,1,0,1,0,5,0,1,0,0,1},
+    {1,0,8,0,2,2,1,0,1,0,0,0,1,0,0,1},
+    {1,1,1,1,1,1,1,0,1,1,3,1,1,0,0,1},
+    {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
+    {1,0,2,0,0,0,1,1,1,1,1,1,1,0,0,1}, 
+    {1,0,0,0,2,0,3,6,6,7,7,7,1,0,0,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,1},
+    {1,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1},
+    {1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
+}
+local mapSize = 16
+
+local map = {}
+local px, py, pa = 2.5, 2.5, 0 
+local fov = math.rad(60)  
+local items = {}      --     
+local depthBuffer = {}
+local victoryTime = 0
+local gameOverTime = 0
+
+local ammoPistol = 20
+local ammoShotgun = 0
+local hasShotgun = false
+local hasRedKey = false
+local currentWeapon = 1 -- 1: , 2: 
+
+local isShooting = false
+local shootFrame = 0
+
+local function isFree(x, y)
+    local cx = math.floor(x) + 1
+    local cy = math.floor(y) + 1
+    if cx <= 1 or cx >= mapSize or cy <= 1 or cy >= mapSize then return false end
+    return map[cy] and map[cy][cx] == 0
+end
+
+local function initGame()
+    items = {}
+    map = {}
+    ammoPistol = 20
+    ammoShotgun = 0
+    hasShotgun = false
+    hasRedKey = false
+    currentWeapon = 1
+
+    for y = 1, mapSize do
+        map[y] = {}
+        for x = 1, mapSize do
+            local tile = baseMap[y][x]
+            --     
+            if tile == 2 then -- 
+                table.insert(items, {type = "monster", x = x - 0.5, y = y - 0.5, speed = 0.022})
+                map[y][x] = 0
+            elseif tile >= 5 and tile <= 8 then --  (, , )
+                local typeMap = {[5] = "shotgun", [6] = "ammo_p", [7] = "ammo_s", [8] = "key_red"}
+                table.insert(items, {type = typeMap[tile], x = x - 0.5, y = y - 0.5})
+                map[y][x] = 0
+            else
+                map[y][x] = tile
+            end
+        end
+    end
+    px, py, pa = 2.5, 2.5, 0
+end
+
+initGame()
+
+local numRays = 50 
+local rayStep = fov / numRays
+local wallWidth = scrW / numRays
+
+hook.add("renderoffscreen", "holo_doom_advanced", function()
+    local now = timer.systime()
+    if next_frame > now then return end
+    next_frame = now + fps_delta
+
+    local m_cos, m_sin, m_floor, m_abs, m_max, m_min, m_atan2 = math.cos, math.sin, math.floor, math.abs, math.max, math.min, math.atan2
+    local r_drawRect, r_setRGBA, r_drawText = render.drawRect, render.setRGBA, render.drawText
+
+    if now < victoryTime or now < gameOverTime then
+        render.selectRenderTarget("screenRT") render.clear()
+        render.setFont("Trebuchet24")
+        if now < victoryTime then
+            r_setRGBA(0, 50, 0, 255) r_drawRect(0,0,scrW,scrH)
+            r_setRGBA(0, 255, 100, 255) r_drawText(scrW/2 - 120, scrH/2 - 20, "LEVEL COMPLETE!", 2)
+        else
+            r_setRGBA(50, 0, 0, 255) r_drawRect(0,0,scrW,scrH)
+            r_setRGBA(255, 0, 0, 255) r_drawText(scrW/2 - 100, scrH/2 - 20, "YOU DIED...", 2)
+        end
+        return
+    end
+
+    local moveSpeed = 0.10
+    local rotSpeed = 0.08
+    local dx, dy = m_cos(pa) * moveSpeed, m_sin(pa) * moveSpeed
+
+    if input.isKeyDown(KEY.W) then
+        if isFree(px + dx, py) then px = px + dx end
+        if isFree(px, py + dy) then py = py + dy end
+    end
+    if input.isKeyDown(KEY.S) then
+        if isFree(px - dx, py) then px = px - dx end
+        if isFree(px, py - dy) then py = py - dy end
+    end
+    if input.isKeyDown(KEY.A) then pa = pa - rotSpeed end
+    if input.isKeyDown(KEY.D) then pa = pa + rotSpeed end
+
+    if px < 1.2 then px = 1.2 elseif px > mapSize - 1.2 then px = mapSize - 1.2 end
+    if py < 1.2 then py = 1.2 elseif py > mapSize - 1.2 then py = mapSize - 1.2 end
+
+    if input.isKeyDown(KEY.KEY1) then currentWeapon = 1 end
+    if input.isKeyDown(KEY.KEY2) and hasShotgun then currentWeapon = 2 end
+
+    if input.isKeyDown(KEY.F) then
+        local checkX = m_floor(px + m_cos(pa) * 1.2) + 1
+        local checkY = m_floor(py + m_sin(pa) * 1.2) + 1
+        if checkX >= 1 and checkX <= mapSize and checkY >= 1 and checkY <= mapSize then
+            local tile = map[checkY][checkX]
+            if tile == 3 then 
+                map[checkY][checkX] = 0  
+            elseif tile == 4 and hasRedKey then 
+                map[checkY][checkX] = 0 
+            elseif tile == 9 then 
+                victoryTime = now + 2.0
+                initGame() --    
+            end
+        end
+    end
+
+    if input.isKeyDown(KEY.X) and not isShooting then
+        local hasAmmo = (currentWeapon == 1 and ammoPistol > 0) or (currentWeapon == 2 and ammoShotgun > 0)
+        
+        if hasAmmo then
+            isShooting = true
+            shootFrame = now + 0.3
+             
+            if currentWeapon == 1 then ammoPistol = ammoPistol - 1 else ammoShotgun = ammoShotgun - 1 end
+
+            local hitTargets = {}
+            for idx, item in ipairs(items) do
+                if item.type == "monster" then
+                    local sx, sy = item.x - px, item.y - py
+                    local dist = math.sqrt(sx*sx + sy*sy)
+                    local angle = m_atan2(sy, sx) - pa
+                    if angle < -math.pi then angle = angle + math.pi*2 end
+                    if angle > math.pi then angle = angle - math.pi*2 end
+
+                    -- :    (0.12 ),    (0.35  !)
+                    local weaponSpread = (currentWeapon == 1) and 0.12 or 0.35
+                    if m_abs(angle) < weaponSpread and dist < 12 then
+                        table.insert(hitTargets, {idx = idx, dist = dist})
+                    end
+                end
+            end
+            if #hitTargets > 0 then
+                table.sort(hitTargets, function(a,b) return a.dist < b.dist end)
+                if currentWeapon == 1 then
+                    table.remove(items, hitTargets[1].idx) --     ( )
+                else
+                    for i = #hitTargets, 1, -1 do table.remove(items, hitTargets[i].idx) end
+                end
+            end
+        end
+    end
+
+    if isShooting and now > shootFrame then isShooting = false end
+
+    for i = #items, 1, -1 do
+        local item = items[i]
+        local mx, my = item.x - px, item.y - py
+        local dist = math.sqrt(mx*mx + my*my)
+        if item.type == "monster" then
+            if dist < 0.4 then gameOverTime = now + 2.0; initGame(); return end
+            local mdx = (mx > 0 and -1 or 1) * item.speed
+            local mdy = (my > 0 and -1 or 1) * item.speed
+            if isFree(item.x + mdx, item.y) then item.x = item.x + mdx end
+            if isFree(item.x, item.y + mdy) then item.y = item.y + mdy end
+        else
+            if dist < 0.5 then
+                if item.type == "shotgun" then hasShotgun = true; currentWeapon = 2
+                elseif item.type == "key_red" then hasRedKey = true
+                elseif item.type == "ammo_p" then ammoPistol = m_min(40, ammoPistol + 10)
+                elseif item.type == "ammo_s" then ammoShotgun = m_min(40, ammoShotgun + 4)
+                end
+                table.remove(items, i)
+            end
+        end
+    end
+
+    render.selectRenderTarget("screenRT") render.clear()
+    r_setRGBA(20, 20, 25, 255) r_drawRect(0, 0, scrW, scrH / 2)
+    r_setRGBA(40, 40, 40, 255) r_drawRect(0, scrH / 2, scrW, scrH / 2)
+
+    local startAngle = pa - fov / 2
+    for i = 0, numRays - 1 do
+        local rayAngle = startAngle + (i * rayStep)
+        local distance = 0
+        local hitWall = false
+        local cosA, sinA = m_cos(rayAngle), m_sin(rayAngle)
+        local hitX, hitY, side, tileType = 0, 0, 0, 1
+        while not hitWall and distance < 12 do
+            distance = distance + 0.12 
+            hitX = px + cosA * distance hitY = py + sinA * distance
+            local checkX, checkY = m_floor(hitX) + 1, m_floor(hitY) + 1
+            if checkX < 1 or checkX > mapSize or checkY < 1 or checkY > mapSize then
+                hitWall = true distance = 12 
+            elseif map[checkY] and map[checkY][checkX] and map[checkY][checkX] > 0 then
+                hitWall = true tileType = map[checkY][checkX]
+                local edgeX, edgeY = hitX - m_floor(hitX), hitY - m_floor(hitY)
+                if m_abs(edgeX - 0.5) > m_abs(edgeY - 0.5) then side = 1 else side = 0 end
+            end
+        end
+        local correctedDist = distance * m_cos(rayAngle - pa)
+        depthBuffer[i] = correctedDist
+        local wallHeight = m_min(scrH, (scrH / (correctedDist + 0.001)))
+        local r, g, b = 200, 70, 0
+        if tileType == 3 then r, g, b = 100, 100, 100 
+        elseif tileType == 4 then r, g, b = 200, 0, 0 
+        elseif tileType == 9 then r, g, b = 0, 255, 100
+        end
+        if side == 1 then r, g, b = r * 0.6, g * 0.6, b * 0.6 end
+        local fog = m_max(0, 1 - (correctedDist / 10))
+        r_setRGBA(m_floor(r * fog), m_floor(g * fog), m_floor(b * fog), 255)
+        r_drawRect(i * wallWidth, (scrH - wallHeight) / 2, wallWidth + 2, wallHeight)
+    end
+    for _, sprite in ipairs(items) do
+        local sx, sy = sprite.x - px, sprite.y - py
+        local spriteDist = math.sqrt(sx*sx + sy*sy)
+        local spriteAngle = m_atan2(sy, sx) - pa
+        if spriteAngle < -math.pi then spriteAngle = spriteAngle + math.pi*2 end
+        if spriteAngle > math.pi then spriteAngle = spriteAngle - math.pi*2 end
+        if spriteDist > 0.2 and m_abs(spriteAngle) < fov then
+            local screenX = (scrW / 2) + (m_sin(spriteAngle) * (scrW / 2) / m_cos(spriteAngle))
+            local spriteHeight = m_min(scrH, scrH / (spriteDist + 0.001))
+            local spriteWidth = spriteHeight * 0.5
+            local startX = screenX - spriteWidth / 2
+            for stripe = 0, spriteWidth - 1 do
+                local rayIdx = m_floor((startX + stripe) / wallWidth)
+                if rayIdx >= 0 and rayIdx < numRays and spriteDist < depthBuffer[rayIdx] then  
+                local r, g, b = 255, 255, 255
+                if sprite.type == "monster" then r, g, b = 20, 180, 20 --  
+                elseif sprite.type == "shotgun" then r, g, b = 130, 100, 40 --  
+                elseif sprite.type == "key_red" then r, g, b = 255, 0, 0 --   
+                elseif sprite.type == "ammo_p" then r, g, b = 200, 200, 0 --   
+                elseif sprite.type == "ammo_s" then r, g, b = 0, 150, 255 --   
+                end
+            local fog = m_max(0, 1 - (spriteDist / 10))
+            r_setRGBA(m_floor(r * fog), m_floor(g * fog), m_floor(b * fog), 255)
+            r_drawRect(startX + stripe, (scrH - spriteHeight) / 2, 1, spriteHeight)
+                end
+            end
+        end
+    end
+    r_setRGBA(15, 15, 20, 255) r_drawRect(0, scrH - 80, scrW, 80) --  HUD
+    render.setFont("Trebuchet24")
+    r_setRGBA(255, 150, 0, 255)
+    if currentWeapon == 1 then
+        r_drawText(50, scrH - 55, "AMMO: " .. ammoPistol .. " / 40 (PISTOL)", 0)
+    else
+        r_drawText(50, scrH - 55, "AMMO: " .. ammoShotgun .. " / 40 (SHOTGUN)", 0)
+    end   
+    r_setRGBA(200, 200, 200, 255)
+    local invText = "KEYS: " .. (hasRedKey and "RED " or "NONE ") .. "| ARSENAL: PISTOL" .. (hasShotgun and ", SHOTGUN" or "")
+    r_drawText(scrW - 450, scrH - 55, invText, 0)
+    if isShooting then
+        r_setRGBA(255, 255, 0, 255) --     
+        r_drawRect(scrW / 2 - 50, scrH - 420, 100, 120)
+        r_setRGBA(100, 100, 105, 255)
+        r_drawRect(scrW / 2 - 40, scrH - 350, 80, 350)
+    else
+        r_setRGBA(60, 60, 65, 255) --     
+        r_drawRect(scrW / 2 - 20, scrH - 280, 40, 280)
+    end
+    r_setRGBA(255, 255, 255, 150) r_drawRect(scrW / 2 - 4, scrH / 2 - 4, 8, 8)
+end)
